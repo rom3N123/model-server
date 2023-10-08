@@ -1,17 +1,16 @@
-version: '1.0'
+version: '3.0'
 
 services:
   main:
+    platform: linux/arm64
     container_name: main
     build:
       context: .
     env_file:
-      - .production.env
+      - .env
     volumes:
-      - .:/app
+      - ./:/app
       - /app/node_modules
     ports:
-      - 5005:5005
       - 7000:7000
-    command: npm run start
-    restart: always
+    command: npm run start:dev
