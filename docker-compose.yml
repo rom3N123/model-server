@@ -1,0 +1,17 @@
+version: '1.0'
+
+services:
+  main:
+    container_name: main
+    build:
+      context: .
+    env_file:
+      - .production.env
+    volumes:
+      - .:/app
+      - /app/node_modules
+    ports:
+      - 5005:5005
+      - 7000:7000
+    command: npm run start
+    restart: always
