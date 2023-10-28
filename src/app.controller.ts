@@ -1,20 +1,12 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { AppService } from './app.service';
 import { FormDataRequest, MemoryStoredFile } from 'nestjs-form-data';
-import * as tf from '@tensorflow/tfjs-node-gpu';
-import { IMAGE_HEIGHT, IMAGE_WIDTH, model } from './model';
-import { mkdir, readFile, readdir, writeFile } from 'fs/promises';
+import * as tf from '@tensorflow/tfjs-node';
+import { IMAGE_HEIGHT, IMAGE_WIDTH, createModel } from './model';
+import { mkdir, readFile, readdir, writeFile, rm } from 'fs/promises';
 import { readFileSync } from 'fs';
 
-export type TrainDto = {
-  modelName: string;
-  modelDescription: string;
-  item1Name: string;
-  item2Name: string;
-  item1Images: MemoryStoredFile[];
-  item2Images: MemoryStoredFile[];
-  epochs: string;
-};
+export type TrainDto = any;
 
 export type StartDto = {
   images: MemoryStoredFile[];
@@ -23,6 +15,13 @@ export type StartDto = {
 @Controller()
 export class AppController {
   constructor(private readonly appService: AppService) {}
+
+  @Delete('models/:modelId')
+  async deleteModel(@Param('modelId') modelId: string) {
+    const modelPath = `./models/${modelId}`;
+
+    await rm(modelPath, { recursive: true });
+  }
 
   @Post('models/:modelId/start')
   @FormDataRequest()
@@ -47,13 +46,20 @@ export class AppController {
       return resizedImage.div(tf.scalar(255.0)).expandDims();
     });
 
-    const results = await model.predict(processedImages);
+    const results = await Promise.all(
+      processedImages.map((image) => model.predict(image)),
+    );
 
-    // @ts-expect-error hello
-    const classNameIndex = results.argMax(-1).dataSync()[0];
-    const classLabel = items[classNameIndex]?.name || 'Неизвестный класс';
+    const classNameIndexes = results.map((result) =>
+      // @ts-expect-error aaa
+      result.argMax(-1).dataSync(),
+    );
 
-    return classLabel;
+    const classNames = classNameIndexes.map(
+      ([index]) => items[index]?.name || 'Неизвестный класс',
+    );
+
+    return classNames;
   }
 
   @Get('models')
@@ -81,51 +87,49 @@ export class AppController {
   @FormDataRequest()
   async train(
     @Body()
-    {
-      epochs,
-      modelName,
-      item1Name,
-      item2Name,
-      modelDescription,
-      item1Images,
-      item2Images,
-    }: TrainDto,
+    { classNames, modelName, epochs, ...data }: TrainDto,
   ) {
-    const item1ProcessedImages = item1Images.map((file) => {
-      const decodedImage = tf.node.decodeImage(file.buffer);
-      const resizedImage = tf.image.resizeBilinear(decodedImage, [
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-      ]);
-      return resizedImage.div(tf.scalar(255.0)).expandDims();
+    const numberOfClassess = classNames.length;
+
+    const processedImages = classNames.map((_, index) => {
+      const images = data[`class_${index}_images`];
+
+      return images.map((file) => {
+        const decodedImage = tf.node.decodeImage(file.buffer);
+        const resizedImage = tf.image.resizeBilinear(decodedImage, [
+          IMAGE_WIDTH,
+          IMAGE_HEIGHT,
+        ]);
+        return resizedImage.div(tf.scalar(255.0)).expandDims();
+      });
     });
 
-    const item2ProcessedImages = item2Images.map((file) => {
-      const decodedImage = tf.node.decodeImage(file.buffer);
-      const resizedImage = tf.image.resizeBilinear(decodedImage, [
-        IMAGE_WIDTH,
-        IMAGE_HEIGHT,
-      ]);
-      return resizedImage.div(tf.scalar(255.0)).expandDims();
-    });
-
-    const images = item1ProcessedImages.concat(item2ProcessedImages);
-    const labels = tf.tensor2d(
-      // @ts-expect-error hello world!
-      Array.from({ length: item1ProcessedImages.length })
-        .fill([1, 0])
-        .concat(
-          Array.from({ length: item2ProcessedImages.length }).fill([0, 1]),
+    const labels = processedImages.map((images, index) => {
+      const length: number = images.length;
+      const labels = Array.from({ length }).fill(
+        Array.from({ length: numberOfClassess }, (_, idx) =>
+          idx === index ? 1 : 0,
         ),
-    );
+      ) as number[][];
+
+      return labels;
+    });
 
     const BATCH_SIZE = 8;
 
-    await model.fit(tf.concat(images), labels, {
-      batchSize: BATCH_SIZE,
-      epochs: Number(epochs),
-      shuffle: true,
+    const model = createModel({
+      numberOfClassess,
     });
+
+    await model.fit(
+      tf.concat(processedImages.flat()),
+      tf.tensor2d(labels.flat()),
+      {
+        batchSize: BATCH_SIZE,
+        epochs: Number(epochs),
+        shuffle: true,
+      },
+    );
 
     const modelId = Date.now().toString();
 
@@ -133,19 +137,15 @@ export class AppController {
 
     const meta = JSON.stringify({
       name: modelName,
-      description: modelDescription,
     });
 
-    const classNames = JSON.stringify([
-      {
-        name: item1Name,
-      },
-      { name: item2Name },
-    ]);
+    const classess = JSON.stringify(
+      classNames.map((className) => ({ name: className })),
+    );
 
     await mkdir(modelFolderPath, { recursive: true });
     await writeFile(`${modelFolderPath}/meta.json`, meta);
-    await writeFile(`${modelFolderPath}/items.json`, classNames);
+    await writeFile(`${modelFolderPath}/items.json`, classess);
     model.save(`file://${modelFolderPath}`);
   }
 }
